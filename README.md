@@ -1,32 +1,343 @@
-# Strategy-Matched SRPO
+# PI-Gated Verified Local Repair for SRPO
 
 ## 一句话概括
 
-在 SRPO 中，正确 rollout 继续走 GRPO；对于错误 rollout，不再随意选择一条正确 sibling 作为教师特权信息，而是优先选择一条与错误 rollout **共享相同已验证推理前缀**的正确 sibling，再使用原 SRPO 的自蒸馏目标进行训练。
+学生对每道题生成 8 条 on-policy rollout。最终正确的 rollout 继续走 GRPO；对于错误 rollout，先从正确 siblings 中寻找与其推理路线兼容的教师流程，再利用教师流程提出局部修复，最后用教师的正确结果验证该修复是否真的提高终局成功率。只有通过验证的局部 repair pair 才进入训练。
 
-核心目的不是创造更强教师，而是让同一个模型看到一条与当前失败路线兼容的成功证据。
+核心原则是：
+
+> **解题流程负责告诉学生“哪里、怎样改”；最终结果负责验证“这样改是否真的有用”。**
 
 ---
 
-## 1. 要解决的问题
+## 1. 问题背景
 
-SRPO 的基本路线是：
+SRPO 的基本路由为：
 
 - 最终答案正确的 rollout → GRPO；
-- 最终答案错误且存在正确 sibling 的 rollout → SDPO；
-- 正确 sibling 的完整回答作为 self-teacher 的 privileged information（PI）。
+- 最终答案错误且存在教师信息的 rollout → SDPO；
+- 同题正确 sibling 的完整回答可作为 self-teacher 的 privileged information（PI）。
 
-但这里存在一个未解决的问题：**同一道题可能有多种正确方法，而任意正确 sibling 不一定适合当前错误 rollout。**
+但“存在正确 sibling”只说明 PI 可以构造，不代表：
 
-例如，错误 rollout 采用“先除法”，教师 PI 却采用“先展开”。两条路线都可能合法，但它们的中间状态和下一步动作不同。自教师可能把正常的方法差异误当成错误，也可能无法准确纠正当前失败步骤。
+1. 这条 sibling 的解题过程可信；
+2. 它与当前错误 rollout 的方法兼容；
+3. 它能给当前失败轨迹提供新增信息；
+4. 它造成的教师分布变化方向正确；
+5. 这种变化最终能够转化成学生无 PI 的推理能力。
 
-因此，本方案要回答的问题是：
-
-> 对一条具体的失败 rollout，哪一条正确 sibling 最适合作为它的教师信息？
+因此，本方法不再把 teacher availability 简单定义为“存在正确 sibling”，而是检查 PI 的质量、兼容性和反事实效用。
 
 ---
 
-## 2. 最简单的例子
+## 2. 必须先纠正的错误前提
+
+### 2.1 最终答案正确不等于过程正确
+
+一条 rollout 可能通过错误抵消得到正确答案。因此：
+
+```text
+final correct ≠ process correct
+```
+
+如果教师将看到完整过程，就应该尽量验证完整过程；如果只能验证局部过程，则只能把经过验证的片段作为可靠 PI，不能把后半段默认当成真值。
+
+### 2.2 同方法不等于有用
+
+self-teacher 已经看到了学生的失败前缀。同方法 sibling 可能只是重复学生已经知道的内容，没有产生任何新增指导。
+
+### 2.3 高置信度不等于正确
+
+低熵、高置信度或较大的 KL/JS 只能说明教师分布发生了明显变化，不能证明变化朝正确方向发生。同一个模型也可能非常自信地重复错误。
+
+### 2.4 “充分利用 PI”不等于把全部信息喂给所有 token
+
+如果中间推理阶段始终直接看到最终答案，模型可能学会根据答案反向拼凑过程，形成 answer shortcut。训练准确率可能上升，但无 PI 推理能力不一定提升。
+
+因此，最终答案和解题流程必须分工，而不是无差别拼接。
+
+---
+
+## 3. 双通道特权信息
+
+对正确 sibling \(j\)，将 PI 拆成：
+
+$$
+\mathrm{PI}_j=(a_j^*,\tau_j^*),
+$$
+
+其中：
+
+- \(a_j^*\)：经过 verifier 确认的最终结果；
+- \(\tau_j^*\)：正确 sibling 的解题流程，不包含独立的 `<final>` 字段。
+
+两部分的职责不同：
+
+| PI 部分 | 主要作用 | 不应承担的作用 |
+|---|---|---|
+| 最终结果 \(a_j^*\) | 终局正确性验证、suffix 成功判定 | 直接监督所有中间推理 token |
+| 解题流程 \(\tau_j^*\) | 方法匹配、寻找分叉、提出局部修复 | 单独证明修复后的终局结果正确 |
+
+对于存在多个等价答案的任务，\(a_j^*\) 应由等价性 verifier 判断，而不是做字符串完全匹配。
+
+---
+
+## 4. 完整流程
+
+```mermaid
+flowchart TD
+    X[题目 x] --> R[学生生成 8 条 on-policy rollout]
+    R --> A[验证结果并用完整 8 条计算 GRPO advantage]
+    A --> C{rollout 是否正确}
+    C -->|正确| G[GRPO]
+    C -->|错误| B[建立正确 sibling PI 候选集]
+    B --> Q{PI 流程是否可信}
+    Q -->|否| F[视为无可靠 PI，回退]
+    Q -->|是| M[匹配 verified process prefix]
+    M --> E{是否存在兼容 PI}
+    E -->|否| F
+    E -->|是| P[从 PI 流程提取局部修复 v+]
+    P --> V[比较原动作 v- 与修复动作 v+ 的后缀成功率]
+    V --> U{修复是否显著提高终局成功率}
+    U -->|否| F
+    U -->|是| L[对 accepted repair pair 做局部学习]
+```
+
+必须在样本路由前，用完整 8 条 rollout 计算组相对 advantage，避免改变 GRPO 的组基线。
+
+---
+
+## 5. Step 1：生成 rollout 与完整组优势
+
+对题目 \(x\)，学生策略生成：
+
+$$
+y_i\sim\pi_\theta(\cdot\mid x),\qquad i=1,\ldots,8.
+$$
+
+verifier 给出终局奖励 \(r_i\)，并在路由前计算：
+
+$$
+A_i^{\mathrm{GRPO}}
+=\frac{r_i-\bar r}{\sigma_r+\epsilon}.
+$$
+
+随后再将样本分为：
+
+- 正确 rollout：继续走 GRPO；
+- 错误 rollout：进入 PI 检查与局部修复流程。
+
+---
+
+## 6. Step 2：检查 PI 自身质量
+
+对正确 sibling \(j\)，定义质量门：
+
+$$
+Q_j=
+\mathbf 1[
+\text{final verified}
+\land
+\text{exposed process verified}
+\land
+\text{not answer-only shortcut}
+].
+$$
+
+建议首个 pilot 使用具有确定性 checker 的任务，例如结构化单变量线性方程：
+
+```text
+<op>divide_both_sides(3)</op>
+<state>x+2=5</state>
+```
+
+checker 从题目给出的初始状态开始执行每个操作，并验证 claimed post-state。无法解析、过程不合法或只修改 `<final>` 的 sibling 不能作为可靠过程 PI。
+
+如果开放式任务无法验证完整过程，应分别报告：
+
+- full-process-valid PI 覆盖率；
+- partial-process-valid PI 覆盖率；
+- 未验证后缀长度。
+
+不能把“模型自评正确”当成独立 verifier。
+
+---
+
+## 7. Step 3：将 PI 与具体失败轨迹配对
+
+PI 是否适合使用是 pairwise 属性，不是 sibling 的全局属性。
+
+对失败 rollout \(i\) 和正确 sibling \(j\)，定义：
+
+$$
+C_{ij}=\operatorname{VerifiedPrefixMatch}(y_i^-,\tau_j^*).
+$$
+
+可将每个验证过的步骤表示为 transition key：
+
+$$
+z_k=
+(\operatorname{canon}(s_{k-1}),\ o_k(\text{args}),\ \operatorname{canon}(s_k)).
+$$
+
+\(C_{ij}\) 取双方从开头连续共享的 verified transition 数量。匹配时禁止使用：
+
+- 最终答案；
+- 错误发生后的失败后缀；
+- 整条文本长度；
+- 单纯措辞或格式相似度。
+
+先用 \(Q_j\) 过滤，再选择 \(C_{ij}\) 最大的 top-1 sibling；top-1 无法构造有效修复时，最多尝试 top-2。不要对所有 siblings 做昂贵全配对，也不要逐 token 混合多个教师。
+
+---
+
+## 8. Step 4：构造局部 repair pair
+
+设失败 rollout 与教师流程共享的最长有效前缀为 \(h_i\)。在其后比较：
+
+- 原始错误动作：\(v_i^-\)；
+- 教师流程给出的候选修复：\(v_{ij}^+\)。
+
+候选 pair 必须满足：
+
+1. \(h_i\) 完全来自学生原始 rollout；
+2. \(v_i^-\) 是完整、连续的原始 step/span；
+3. \(v_{ij}^+\) 从相同状态出发；
+4. checker 判定 \(v_i^-\) 无效、\(v_{ij}^+\) 有效；
+5. 如果两种动作都有效，只是采用不同路线，则不能把原动作当负例；
+6. 纯 `<final>` answer patch 不进入主训练。
+
+这里使用的是教师的过程 PI，而不是最终答案。
+
+---
+
+## 9. Step 5：用最终结果验证局部修复
+
+从完全相同的学生前缀构造两条分支：
+
+```text
+原分支：h_i + v_i^-
+修复分支：h_i + v_{ij}^+
+```
+
+冻结行为策略 \(\pi_{\mathrm{old}}\)，分别从两条分支继续采样 suffix。使用结果 PI \(a_j^*\) 或任务 verifier 判断终局成功：
+
+$$
+p_{ij}^-=Pr_{\pi_{\mathrm{old}}}
+(\text{success}\mid h_i\oplus v_i^-),
+$$
+
+$$
+p_{ij}^+=\Pr_{\pi_{\mathrm{old}}}
+(\text{success}\mid h_i\oplus v_{ij}^+).
+$$
+
+定义 PI 对当前失败轨迹的反事实效用：
+
+$$
+U_{ij}=p_{ij}^+-p_{ij}^-.
+$$
+
+只有当：
+
+$$
+U_{ij}>\delta
+$$
+
+并通过预注册的统计判定时，才接受该 repair pair。
+
+候选修复必须在查看 suffix 结果之前固定，避免生成许多候选后只挑偶然效果最好的一个。若需要从 top-2 中选择，选择样本和最终确认样本必须独立，降低 winner's curse。
+
+---
+
+## 10. 新的 PI 可用性定义
+
+原始 teacher-availability flag 可写成：
+
+$$
+m_i=\mathbf 1[\text{存在正确 sibling}].
+$$
+
+本方法将其改为：
+
+$$
+m_i^{\mathrm{PI}}
+=\mathbf 1\left[
+\exists j:
+Q_j=1,
+C_{ij}\ge\tau_c,
+U_{ij}>\delta
+\right].
+$$
+
+逻辑漏斗为：
+
+```text
+存在正确 sibling
+→ PI 自身可信
+→ PI 与当前失败兼容
+→ PI 给出合法局部修复
+→ 修复提高终局成功率
+→ 才允许学习
+```
+
+若任一条件不满足，就视为“没有可靠 PI”，不能因为存在最终正确 sibling 就强行蒸馏。
+
+---
+
+## 11. Step 6：训练对象与验证对象对齐
+
+如果验证的是局部修复 \(v^+\)，却对整条失败 rollout 做完整 SDPO，那么：
+
+```text
+验证对象 = 局部动作
+训练对象 = 整条失败轨迹
+```
+
+二者不一致，无法证明训练更新得到验证。
+
+因此，正确 rollout 继续走 GRPO；错误且 repair 通过验证的 rollout 只学习 accepted local pair。
+
+定义 span 联合 log-prob：
+
+$$
+\ell_\theta(v\mid h)
+=\sum_{t=1}^{|v|}\log\pi_\theta(v_t\mid h,v_{<t}).
+$$
+
+相对冻结行为策略：
+
+$$
+d_\theta(h,v)
+=\ell_\theta(v\mid h)-\ell_{\mathrm{old}}(v\mid h).
+$$
+
+局部 pair loss：
+
+$$
+\mathcal L_{\mathrm{pair}}
+=-\log\sigma\left(
+\beta[
+d_\theta(h_i,v_{ij}^+)-d_\theta(h_i,v_i^-)
+]
+\right).
+$$
+
+总损失：
+
+$$
+\mathcal L
+=\mathcal L_{\mathrm{GRPO}}
++\lambda_{\mathrm{pair}}\mathcal L_{\mathrm{pair}}.
+$$
+
+accepted failure 不再同时接收整条负 GRPO 和完整 SDPO，避免多个不一致目标叠加。
+
+没有可靠 PI 或 repair 未通过验证的失败样本，按预注册规则回退原 SRPO 的 GRPO 分支，或者不产生局部 pair loss；两种实现必须分开说明，不能混称。
+
+---
+
+## 12. 完整例子
 
 题目：
 
@@ -34,317 +345,212 @@ $$
 3(x+2)=15
 $$
 
-学生生成三条代表性 rollout：
+正确 sibling B：
 
 ```text
-正确 A：展开法
-3x+6=15 → 3x=9 → x=3
+过程 PI：
+1. 两边除以3：x+2=5
+2. 两边减2：x=3
 
-正确 B：先除法
-x+2=5 → x=5-2=3
-
-错误 C：先除法
-x+2=5 → x=5+2=7
+结果 PI：
+x=3
 ```
 
-对于错误 C：
-
-- A 的最终答案正确，但路线不同；
-- B 与 C 都先得到 `x+2=5`；
-- B 和 C 的分叉只发生在下一步：`5-2` 与 `5+2`。
-
-因此，B 比 A 更适合作为 C 的 PI。
-
-这里的关键不是“文本更像”，而是：
+错误 rollout C：
 
 ```text
-错误 C 与正确 B 共享同一个经过验证的中间状态和操作前缀。
+1. 两边除以3：x+2=5
+2. 两边加2：x=7
 ```
 
----
+检查过程：
 
-## 3. 核心流程
+1. **PI 质量**：B 的结果正确，两个过程步骤均可验证；
+2. **方法兼容**：B 与 C 共享 `divide_both_sides(3)` 和状态 `x+2=5`；
+3. **局部 pair**：
 
-```mermaid
-flowchart TD
-    Q[题目 x] --> R[学生生成 8 条 on-policy rollout]
-    R --> V[验证最终答案并计算完整组 GRPO advantage]
-    V --> C{rollout 最终是否正确}
-    C -->|正确| G[保持原 SRPO：GRPO]
-    C -->|错误| S{是否存在正确 sibling}
-    S -->|不存在| F[保持原 SRPO 的无 PI 回退]
-    S -->|存在| M[计算 verified-prefix compatibility]
-    M --> E{存在兼容 sibling}
-    E -->|存在| P[选择共享最长已验证前缀的完整 sibling]
-    E -->|不存在| U[从正确 siblings 中按预注册规则均匀回退]
-    P --> D[保持原 SRPO：self-teacher + SDPO]
-    U --> D
-```
+   ```text
+   h  = x+2=5
+   v- = add_both_sides(2)      → x=7
+   v+ = subtract_both_sides(2) → x=3
+   ```
 
-必须先用完整 8 条 rollout 计算组相对 advantage，再进行样本路由，避免改变 GRPO 的组基线。
+4. **终局验证**：分别从 `h+v-` 与 `h+v+` 继续 rollout；
+5. **接受条件**：修复分支得到正确答案的概率显著高于原分支；
+6. **训练**：只提高 `subtract_both_sides(2)` 相对于 `add_both_sides(2)` 的概率。
 
----
-
-## 4. 如何定义“相同方法”
-
-### 4.1 不能直接使用整条文本相似度
-
-整条文本相似可能受到以下因素干扰：
-
-- 措辞和格式；
-- rollout 长度；
-- 最终答案；
-- 错误发生后的连锁偏离。
-
-因此，“embedding 最近”不能直接等价于“方法相同”。
-
-### 4.2 使用已验证 transition 前缀
-
-首个可实施版本限定在具有结构化状态和确定性 checker 的任务中，例如单变量线性方程。
-
-每个步骤表示为：
+模型学习的是：
 
 ```text
-<op>divide_both_sides(3)</op>
-<state>x+2=5</state>
+在状态 x+2=5 下，应当两边减2，而不是加2。
 ```
 
-定义一个 transition key：
-
-$$
-z_k=
-(\operatorname{canon}(s_{k-1}),\ o_k(\text{args}),\ \operatorname{canon}(s_k)).
-$$
-
-其中：
-
-- \(s_{k-1}\)：操作前的规范化状态；
-- \(o_k(\text{args})\)：带参数的操作；
-- \(s_k\)：操作后的规范化状态。
-
-checker 从题目给出的初始状态开始，逐步验证每个 transition。对于失败 rollout，只保留第一条 invalid 或 unsupported transition 之前的 verified prefix。
-
-对于失败 rollout \(i\) 和正确 sibling \(j\)，定义：
-
-$$
-L_{ij}=\text{两条 rollout 从开头连续相同的 verified transition 数量}.
-$$
-
-候选集合为：
-
-$$
-E_i=\{j:r_j=1,\ L_{ij}\ge 1\}.
-$$
-
-选择规则：
-
-1. 如果 \(E_i\neq\varnothing\)，选择 \(L_{ij}\) 最大的正确 sibling；
-2. 多条 sibling 并列时，均匀采样一条完整轨迹；
-3. 如果 \(E_i=\varnothing\)，从全部正确 siblings 中均匀回退；
-4. 不允许逐 token 混合不同 siblings，避免产生不存在的混合方法。
-
-恒等 no-op、题目复述和格式 token 不计入 verified transition。
+而不是简单记忆“最终答案是 3”。
 
 ---
 
-## 5. 训练目标保持不变
+## 13. 最小实验闭环
 
-本方案的首版只修改 **teacher-information selector**，不同时修改 SRPO 的损失。
+### Gate A：PI 漏斗审计
 
-### 正确 rollout
+对失败样本依次报告：
 
-继续使用 GRPO：
+- 存在正确 sibling 的比例；
+- PI 过程通过质量门 \(Q\) 的比例；
+- 存在兼容 PI 的比例；
+- 能构造合法 repair pair 的比例；
+- repair 通过反事实验证的比例；
+- 最终 accepted pair 覆盖率。
 
-$$
-A_i=\frac{r_i-\bar r}{\sigma_r+\epsilon}.
-$$
-
-正确方法之间不互相蒸馏，避免强行规定一种正确路线优于另一种。
-
-### 错误 rollout
-
-令 \(y_{j^*}^{+}\) 为匹配得到的正确 sibling，self-teacher 为：
-
-$$
-q_{i,t}(v)
-=\pi_{\mathrm{stop}}
-(v\mid x,y_{j^*}^{+},y_{i,<t}^{-}).
-$$
-
-然后继续使用原 SRPO 的 entropy-weighted SDPO。
-
-这样可以单独检验：**只改教师信息的选择，是否真的带来更好的监督和学生性能。**
-
----
-
-## 6. 为什么同一个模型仍可能受益
-
-学生和教师使用同一个基础模型，并不意味着这个方案没有意义。
-
-如果模型已经生成过一条与失败路线相同的正确 sibling，至少说明：
+这可以区分：
 
 ```text
-这种方法存在于当前模型的策略支持集中，只是生成不稳定。
+没有成功证据
+PI 本身不可信
+PI 与失败不兼容
+能修局部但不能改善终局
+真正可学习的 repair
 ```
 
-匹配 PI 的作用是检索并激活这次成功行为，让 self-teacher 在失败前缀上提供更兼容的条件分布。
+### Gate B：冻结 checkpoint pilot
 
-但这不等于创造新知识：
+在不训练的情况下测量：
 
-- 如果 8 条 rollout 全错，没有成功证据；
-- 如果某种方法从未成功生成，模型没有可用的同方法教师；
-- 如果 PI 改善但训练后无 PI 性能不变，也不能说学生学会了该知识。
+- \(p^+ - p^-\) 的分布；
+- accepted pair 数量；
+- span 长度与位置；
+- 每个 accepted pair 的额外 suffix token；
+- answer-only proposal 比例；
+- 不同方法簇的接受率。
 
----
+如果预算内几乎没有 accepted pair，就停止，不叠加更多模块。
 
-## 7. 必须防止的错误前提
+### Gate C：训练对照
 
-### 7.1 最终答案正确不等于过程正确
+建议至少比较：
 
-正确 sibling 可能因为错误抵消而偶然得到正确答案。
+1. **原 SRPO**：正确 sibling PI + full SDPO；
+2. **Matched-PI SRPO**：只改 sibling 选择，仍使用 full SDPO；
+3. **Proposed**：matched PI + verified local repair pair。
 
-在结构化数学 pilot 中，教师候选应尽量满足：
-
-```text
-最终答案正确 + 被使用的推理 transition 可以验证。
-```
-
-如果能够低成本验证整条教师过程，应进一步报告 full-process-valid teacher 的覆盖率。
-
-### 7.2 共享前缀不等于整条方法完全相同
-
-两条轨迹可能前两步相同，之后采用不同路线。因此，本方案只声称“前缀兼容”，不声称完整策略身份相同。
-
-### 7.3 教师更匹配不等于更新一定有效
-
-self-teacher 已经看到了学生失败前缀，额外提供匹配 sibling 也可能是冗余信息。因此必须进行同前缀配对实验，而不能只凭直觉论证。
-
-### 7.4 高频方法偏置
-
-常见且容易成功的方法更容易找到匹配 sibling；稀有方法可能频繁回退。必须按方法簇报告匹配率和性能，不能只报告总体准确率。
-
----
-
-## 8. 三阶段验证闭环
-
-### Gate A：Selection Opportunity Audit
-
-先在冻结 checkpoint 上生成固定的 8-rollout 组，统计：
-
-- 有至少两条正确 sibling 的失败样本比例；
-- 同时存在兼容与不兼容正确 sibling 的比例；
-- compatible siblings 的共享前缀长度是否存在差异；
-- checker 支持率；
-- 匹配成功率与均匀回退率；
-- 不同方法簇的匹配覆盖。
-
-如果真正能够改变 sibling 选择的样本太少，应停止该方向，而不是立刻增加模块。
-
-### Gate B：同一失败前缀的教师配对诊断
-
-固定同一个失败前缀，只切换 PI：
-
-- matched sibling；
-- incompatible 或 lower-overlap sibling；
-- uniform sibling；
-- text-nearest sibling。
-
-在不查看 PI 的条件下，预先构造一个有限候选集合：
-
-- 原始错误 step；
-- 最多 15 个由任务规则生成并经 checker 验证的合法 next steps。
-
-比较不同 PI 下，教师分配给合法候选的归一化概率质量：
-
-$$
-P_q^{\mathrm{valid}}
-=\frac{\sum_{v\in V_{\mathrm{valid}}}\exp(\ell_q(v\mid h))}
-{\sum_{v\in V(h)}\exp(\ell_q(v\mid h))}.
-$$
-
-如果 matched PI 不能提高合法候选偏好，停止进入长训练。
-
-### Gate C：两组训练实验
-
-只比较：
-
-1. Uniform-sibling SRPO；
-2. Verified-prefix-selector SRPO。
-
-两组保持：
-
-- 相同起始 checkpoint；
-- 相同 prompt 日程；
-- 每题固定 8 条 rollout；
-- 相同解码参数、最大长度、优化步数和硬件；
-- 至少 3 个训练 seed。
-
-报告：
+所有方法按总生成 token 或 GPU 时间匹配，报告：
 
 - 无 PI held-out pass@1；
-- 有效 transition 比例；
-- 方法簇覆盖；
-- 实际生成 token；
-- teacher-context token；
-- teacher forward 次数；
-- wall-clock 与等计算学习曲线。
+- 分布转移测试；
+- valid-step rate；
+- 方法簇覆盖与多样性；
+- accepted-pair coverage；
+- 训练和验证额外成本；
+- 至少 3 个训练 seed。
+
+只有 Proposed 在等计算条件下稳定优于前两个基线，才能支持完整机制有效。
 
 ---
 
-## 9. 结果如何解释
+## 14. 主要成本
 
-| 观察结果 | 可以得出的结论 |
-|---|---|
-| Gate A 机会很少 | 固定 8 rollout 下，该 selector 缺乏作用空间 |
-| Gate B 无改善 | 同方法 PI 没有改善条件教师信号 |
-| Gate B 改善、Gate C 不改善 | 教师信号改善没有转化为学生能力 |
-| Gate B、Gate C 都改善 | sibling 选择值得扩展到更开放任务 |
+设每题平均有 \(F\) 条失败 rollout，每个 pair 的两条分支各采样 \(N\) 个 suffix，则额外 suffix 数约为：
 
-即使 Gate C 改善，也不能直接声称模型获得了“真正知识”；最多说明无 PI 行为和可验证推理质量得到改善。
+$$
+2FN.
+$$
 
----
-
-## 10. 为什么暂时不做 step × token 连续权重
-
-教师选择是上游问题。如果 PI 与失败路线不兼容，再精细的 step/token 权重也可能只是更强地放大错误监督。
-
-因此推荐顺序是：
+例如：
 
 ```text
-先验证教师选对了
-→ 再验证教师信号能否转化为学生能力
-→ 最后才研究 step/token 的细粒度信用分配
+F=4，N=4
+额外 suffix = 2×4×4 = 32
 ```
 
-首版不同时引入新权重、新 critic、repair generator 或 trajectory loss，以保证因果结论清晰。
+相比原始 8 条 rollout，额外生成量约为 4 倍，还没有计算 PI 检查和 teacher forward。因此首版建议：
+
+- 每条失败只尝试 top-1 PI；
+- top-1 无法形成合法 pair 时最多尝试 top-2；
+- 先做冻结 checkpoint pilot；
+- 可以只抽样部分失败 rollout，抽样率必须预注册；
+- 缓存过程解析、checker 结果和共享前缀。
 
 ---
 
-## 11. 研究定位与相关工作边界
+## 15. 主要风险与认知偏差
 
-建议将方法定位为：
+### Answer leakage
 
-> **Failure-conditioned, correctness-verified, transition-prefix-compatible sibling assignment.**
+把最终答案暴露给所有中间步骤，可能得到反向拼凑过程。核心版本只用结果 PI 做终局验证。
 
-边界如下：
+### Survivorship bias
 
-- [SRPO](https://arxiv.org/html/2604.02288v1) 使用正确 sibling 作为 PI，但论文只规定选择一条，没有公开方法匹配 selector；
-- [OPSD](https://arxiv.org/html/2601.18734v3) 使用同模型、不同上下文的 student/teacher 进行 on-policy self-distillation；
-- [RSR](https://arxiv.org/html/2601.14249v5) 研究轨迹对学生整体的适配性，不针对某条具体失败 rollout 配对；
-- [TOPD](https://arxiv.org/html/2606.00305) 研究同前缀下的短期轨迹分叉和多 token 指导，不负责选择正确 sibling；
-- [InFlow](https://arxiv.org/html/2609.36695v2) 使用跨题内部表示相似性选择自蒸馏上下文，不是同题正确/错误 rollout 的前缀兼容分配。
+容易题和高频方法更容易产生正确 sibling，也更容易进入训练。必须同时报告 accepted 子集收益和所有失败样本上的总体收益。
 
-因此，不能宽泛声称“首个 similarity-aware self-distillation”。真正需要验证的新意，是针对一条具体失败轨迹选择与其已验证前缀兼容的成功上下文。
+### Winner's curse
+
+候选越多，越容易选到偶然高成功率的 repair。候选必须提前固定，选择与最终确认尽量使用独立样本。
+
+### 多方法误惩罚
+
+与教师不同不代表学生错误。只有原动作被独立 checker 判错时，才能作为 \(v^-\)。
+
+### 全错组边界
+
+如果 8 条 rollout 全错，本方法没有可信结果 PI 和过程 PI，不能凭空生成知识。
+
+### PI 改善不等于知识形成
+
+即使 repair pair 有效、无 PI 准确率提高，也只能证明行为层面的迁移，不能唯一证明模型内部形成了抽象知识。
 
 ---
 
-## 12. 最终决策
+## 16. 为什么暂时不做通用 step × token 连续权重
 
-这个方向值得作为第一优先级 pilot，原因是：
+本方法已经给出了可审计的局部权重：
 
-1. 它直接解决“教师没有看到学生当前方法的成功版本”这一问题；
-2. 它只修改 PI selector，容易与原 SRPO 做干净对照；
-3. 它复用已有 8 条 rollout，匹配本身不需要额外生成；
-4. 它具有明确的停止条件，不需要在失败时不断堆叠新模块。
+```text
+未验证 token/span：权重 0
+accepted repair span：进入 pair objective
+```
 
-同时必须保持结论克制：它解决的是 **教师信息的兼容性选择**，不是全错组、未知知识、一般错误定位或完整 token 信用分配。
+首版不再叠加基于 KL、熵或 token 差异的连续权重，原因是：
+
+- 可能重复放大同一代理信号；
+- 高 KL 可能只是措辞差异；
+- 低熵可能是自信错误；
+- BPE token 不是知识单元；
+- repair 验证的是具体动作，不是任意教师分布。
+
+如果局部 repair 机制成立，再研究 accepted step 内的细粒度 token calibration。
+
+---
+
+## 17. 方法边界与相关工作
+
+建议将当前方法表述为：
+
+> **Strategy-compatible privileged information routing with outcome-verified local repair.**
+
+- [SRPO](https://arxiv.org/html/2604.02288v1) 将正确样本路由到 GRPO，将有教师信息的错误样本路由到 SDPO，并用教师熵做动态权重；其教师信息构造使用同题正确 sibling。
+- [OPSD](https://arxiv.org/html/2601.18734v3) 使用同模型在普通上下文和特权上下文下分别充当学生与教师。
+- [TOPD](https://arxiv.org/html/2606.00305) 指出局部 token 分歧不一定对应真实推理分叉，且单 token 修正不一定恢复完整轨迹。
+
+当前方案不声称解决一般错误定位、所有全错组或模型参数中不存在的知识。它要验证的核心是：
+
+> 当同模型已经生成过一条兼容的成功流程时，能否利用该流程提出局部修复，并用正确结果筛出真正提高终局成功率的修复，再把这一动作级信号蒸馏回无 PI 学生。
+
+---
+
+## 18. 最终逻辑闭环
+
+```text
+学生生成多个 rollout
+→ 正确 sibling 提供结果 PI 与流程 PI
+→ 检查 PI 本身是否可信
+→ 将流程 PI 与具体失败路线匹配
+→ 在共享前缀后提出局部修复
+→ 用结果 PI 验证修复后的终局成功率
+→ 只训练通过验证的 repair pair
+→ 测试时移除全部 PI
+→ 检查学生是否仍能独立完成任务
+```
+
+整个方法的核心不是“存在正确 sibling”，而是：
+
+> **存在一份可信、兼容，并且能通过反事实验证证明对当前失败真正有用的特权信息。**
