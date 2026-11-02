@@ -325,4 +325,4 @@ sibling 会作为 PI 指导多个失败 rollout。如果 sibling 自己包含错
 
 ## 延伸阅读
 
-- [相关方法、教师信息、权重分配与能力边界综述](docs/METHODS_TEACHER_WEIGHT_CAPABILITY_REVIEW.md)
+- [OPSD 教师信息、权重分配与能力边界综述](docs/METHODS_TEACHER_WEIGHT_CAPABILITY_REVIEW.md)

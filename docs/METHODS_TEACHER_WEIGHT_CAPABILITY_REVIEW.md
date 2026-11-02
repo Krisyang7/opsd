@@ -1,8 +1,8 @@
-# OPSD/SRPO 方法综述：教师信息、权重分配与能力边界
+# OPSD 方法综述：教师 PI、位置权重与能力边界
 
 > 更新日期：2026-11-02
 >
-> 目的：把当前 Dual-Gated SRPO 放回相关工作中，明确它解决了什么、没有解决什么，以及下一步最值得验证的方向。
+> 范围：只讨论 OPSD 及其直接变体。GRPO、SDPO、SRPO 只作为当前方案的必要背景，不展开综述。
 
 ## 1. 先给结论
 
@@ -11,7 +11,7 @@
 | 多种正确解法怎么办？ | 不应强迫所有合法解法模仿一个参考。应先判断教师信息与学生当前路线是否兼容，再选择、抽象或边缘化参考信息。 | **部分解决**；自由文本推理中的“路线兼容”仍没有统一可靠定义。 |
 | 教师给学生什么最好？ | 没有普遍最优答案。完整参考解、抽象策略、正确 sibling、局部 critique 和验证后的 repair 各有适用条件；“信息更多”不等于“更会教”。 | **部分解决**；需要在具体模型和任务上比较。 |
 | 每个 step/token 应该同权吗？ | 不能把“显式系数相同”与“实际梯度相同”混为一谈。现有方法已提出题目级、span 级和 token 级非均匀权重，但没有一种信号同时可靠代表正确性、因果责任和可学习性。 | **部分解决**；结论尚不统一。 |
-| 模型能力不足怎么办？ | 先区分有限采样没找到答案、PI 能唤醒潜在能力、局部可修复，以及真正缺知识。最后一种情况不能指望同模型自蒸馏凭空创造知识。 | **大多未解决**；通常要跳过、引入外部知识/工具，或使用课程学习。 |
+| 模型能力不足怎么办？ | 先区分有限采样没找到答案、PI 能唤醒潜在能力、局部可修复，以及真正缺知识。最后一种情况不能指望同模型自蒸馏凭空创造知识。 | **大多未解决**；OPSD 体系通常只能跳过，或依赖外部知识/工具。 |
 
 最重要的五个判断是：
 
@@ -19,7 +19,7 @@
 2. **正确 sibling，不等于适合当前错误轨迹的教师。**
 3. **教师看见 PI 后会做，不等于它给出的逐 token 分布具有纠错作用。**
 4. **修好当前原题，不等于学生学到了可迁移知识。**
-5. **同模型自蒸馏主要重新组织已有能力；真正缺失的知识需要外部来源或课程扩展。**
+5. **同模型自蒸馏主要重新组织已有能力；真正缺失的知识需要外部来源。**
 
 ---
 
@@ -78,7 +78,7 @@ GRPO advantage 仍由**原始 8 条 rollout 的组内奖励**计算；不能把�
 |---|---|---|
 | 过程认证是否可信 | 学生和教师来自同一模型，可能共享错误。 | 循环自证，把共同错误认证为正确。 |
 | 多解法兼容 | 只要求教师不要偏爱参考路线，但没有兼容性机制。 | 合法新方法被错误拒绝；或不兼容 sibling 被用于修复。 |
-| 教师怎样教失败分支 | “可信 PI 进入教师”还没有定义成具体训练目标。 | 方案无法实现或与 OPSD/SDPO 实际机制不一致。 |
+| 教师怎样教失败分支 | “可信 PI 进入教师”还没有定义成具体训练目标。 | 方案无法实现或与 OPSD 实际机制不一致。 |
 | step/token 权重 | 尚未定义。 | 不能声称当前方法已做局部信用分配。 |
 | 8 条全错 | 有外部 PI 时只说“尝试修复”，没有能力诊断和升级规则。 | 把采样失败误判成能力不足，或长期训练无效信号。 |
 | 是否学到知识 | 只验证修复后的原题。 | 可能只是记住提示，没有无 PI 迁移。 |
@@ -87,19 +87,18 @@ GRPO advantage 仍由**原始 8 条 rollout 的组内奖励**计算；不能把�
 
 ---
 
-## 4. 核心范式对照
+## 4. OPSD 与当前方法
+
+必要背景只有三点：GRPO 提供正确分支的结果奖励，SDPO 提供反馈条件自蒸馏，SRPO 提供正确/错误样本路由。它们不是本篇的综述对象。
 
 | 方法 | 主要解决的问题 | 教师/监督信息 | 怎样传给学生 | 位置权重 | 全错或能力不足 | 主要缺陷 |
 |---|---|---|---|---|---|---|
-| [GRPO](https://arxiv.org/abs/2402.03300) | 用可验证结果训练推理，不依赖过程标注。 | 没有教师；使用最终 reward。 | 同题多条 rollout 做组内相对 advantage。 | 同一 rollout 的 token 通常共享同一个序列 advantage。 | 组内奖励相同，尤其全错时，学习信号退化。 | 稀疏；最终结果无法定位错误步骤。 |
 | [OPSD](https://arxiv.org/abs/2601.18734) | 不用更大教师也得到 dense supervision。 | 同一模型充当教师，但额外看到验证过的参考解。 | 教师在**同一学生前缀**上重算 next-token 分布，学生拟合教师分布。 | 标准形式通常按位置等系数聚合分布差异。 | PI 可能唤醒潜在能力；PI 教师也不会时未解决。 | 单参考路线偏置；dense KL 可能主要学习措辞而非推理。 |
-| [SDPO](https://proceedings.mlr.press/v306/hubotter26a.html) | 把反馈或成功样例转成 dense 信号。 | 文本反馈、执行错误或成功 sibling。 | feedback-conditioned self-teacher 在原学生前缀上重评分，再蒸馏。 | 原始聚合通常没有可靠的因果 step 权重。 | 有富反馈时全错组仍可能学习；无反馈时未解决。 | sibling 可能与失败路线不兼容；反馈和教师判断都可能错。 |
-| [SRPO](https://arxiv.org/abs/2604.02288) | 避免在正确样本上继续自蒸馏，并结合 RL 与 dense repair。 | 正确样本用 reward；错误样本用 sibling 或反馈。 | 正确 rollout 走 GRPO；错误且有教师信息的 rollout 走 SDPO。 | 失败分支使用基于教师 entropy 的显式 token 权重。 | 没有 teacher information 时回退；全错且无 PI 仍无有效信号。 | entropy 表示不确定性，不等于错误、因果责任或可学习性。 |
-| **Dual-Gated SRPO（当前）** | 防止“答案正确、过程错误”的 rollout 获奖或传播。 | 最终答案、参考流程、学生 rollout；同模型教师认证过程。 | 先做结果门和过程门，再路由到 GRPO、repair 或 mask。 | 正确分支继承 GRPO；失败分支尚未定义。 | 只有安全回退，没有能力扩展机制。 | 同模型循环认证；多解法匹配、repair loss 和迁移验证尚未闭环。 |
+| **Dual-Gated SRPO（当前）** | 防止“答案正确、过程错误”的 rollout 获奖或传播，并为错误分支引入 OPSD 式教师。 | 最终答案、参考流程、学生 rollout；同模型教师认证过程。 | 先做结果门和过程门，再把失败样本路由到 PI-conditioned teacher。 | 正确分支继承 GRPO；OPSD 修复分支尚未定义。 | 只有安全回退，没有能力扩展机制。 | 同模型循环认证；多解法匹配、repair loss 和迁移验证尚未闭环。 |
 
 ### 教师信息的共同优势
 
-OPSD/SDPO 类方法的核心不是把参考解直接塞给学生做 SFT，而是：
+OPSD 的核心不是把参考解直接塞给学生做 SFT，而是：
 
 1. 学生先到达自己的 on-policy 前缀；
 2. 教师额外看到 PI；
@@ -111,19 +110,16 @@ OPSD/SDPO 类方法的核心不是把参考解直接塞给学生做 SFT，而是
 
 ---
 
-## 5. 教师应该看什么、教什么？
+## 5. OPSD 教师应该看什么、教什么？
 
 | 方法 | 教师看什么/怎样选教师 | 主要优势 | 没有解决的问题 |
 |---|---|---|---|
 | [BRTS](https://arxiv.org/abs/2605.09725) | 生成多条 teacher rollout；先按正确性筛选，再选更接近学生的轨迹；必要时用 ground-truth-conditioned recovery。 | 比随机取一个正确 sibling 更可靠，兼顾“正确”与“学生可接近”。 | 文本接近不等于推理兼容；Best-of-N 成本较高。 |
-| [SMRC-SD](https://arxiv.org/abs/2608.05219) | 比较学生与参考轨迹的环境状态，只蒸馏状态兼容的 turn。 | 避免让学生模仿在当前状态已不可执行的参考动作。 | 依赖显式环境状态；自由文本数学中的状态等价很难定义。 |
+| [SMRC-SD](https://arxiv.org/abs/2608.05219) | 在多轮 agent 中比较学生与参考轨迹的环境状态，只蒸馏状态兼容的 turn。 | 直接处理 privileged OPD 中参考轨迹与学生当前状态不匹配的问题。 | 依赖显式环境状态；自由文本数学中的状态等价很难定义。 |
 | [What Should a Self-Teacher See?](https://arxiv.org/abs/2609.25623) | 比较完整解、策略/框架、题目类别和 answer-only 等不同 PI 粒度。 | 直接指出“更多 PI 不一定更好”，抽象 PI 可减弱路线锚定。 | 最佳粒度依赖任务和模型；没有通用选择器。 |
 | [MCPD](https://arxiv.org/abs/2610.30880) | 给教师同一参考的多个 partial views，再在概率空间边缘化/平均目标。 | 降低对单个参考措辞和信息视图的敏感度。 | 平均目标可能模糊真正不同的正确路线，不能代替路线兼容判断。 |
 | [Critique-Conditioned OPSD](https://arxiv.org/abs/2610.13744) | 先显式生成针对错误轨迹的 critique，再让 scoring teacher 看到 critique。 | 把“发现错误”与“给 logits”分开，比直接重评分更可能产生纠错信号。 | critique 也可能幻觉或继承共同错误；目前证据仍较早期。 |
 | [Privileged, but Biased](https://arxiv.org/abs/2608.04794) | 诊断单一 PI 参考对教师目标的影响，而非提出完整训练算法。 | 提醒我们区分“教师有更多信息”与“教师目标适合学生”。 | 其退化现象来自特定实验设置，不能写成所有自蒸馏都会失败的普遍定理。 |
-| [Pedagogical RL](https://noahziems.com/pedagogical-rl)¹ | 用 PI 和任务 reward 训练教师寻找“正确且学生可学习”的轨迹，再按学生 surprisal 门控模仿。 | 目标从“教师会做”推进到“教师会教”。 | 教师侧训练昂贵；PI 教师找不到成功轨迹时仍无解。 |
-
-¹ Pedagogical RL 链接为作者公开的 early-results 页面，不应与正式同行评审论文等量引用。
 
 ### 对当前方法的直接结论
 
@@ -140,18 +136,15 @@ OPSD/SDPO 类方法的核心不是把参考解直接塞给学生做 SFT，而是
 
 ---
 
-## 6. step/token 权重：现有方法怎么做？
+## 6. OPSD 的 step/token 权重怎么做？
 
 | 层级/方法 | 使用的信号 | 怎样分配权重 | 优势 | 关键缺陷 |
 |---|---|---|---|---|
 | [PACED](https://arxiv.org/abs/2603.11178) | 学生对题目的经验通过率 \(p\)。 | 题目级 \(w(p)=p(1-p)\)，更重视能力前沿题。 | 简单，把预算从已掌握题和极难题移开。 | 0/8 对真实 \(p\) 的估计噪声很大；跳过难题不等于解决难题。 |
-| [HINT-SD](https://arxiv.org/abs/2605.17873) | 完整失败轨迹中的失败相关 action/span。 | 只蒸馏选中的局部 span，其余位置为 0。 | 局部、节省计算，避免给整条轨迹同样监督。 | 错误定位和 hint 仍可能由同模型误判。 |
 | [Trajectory-aware OPD（TOPD）](https://arxiv.org/abs/2606.00305) | 教师与学生的近未来短窗轨迹差异。 | 把指导分配给真正发生短期漂移的一段 token。 | 比单 token KL 更能处理连续偏航。 | continuation 和比较成本高；仍不保证最终结果被修复。 |
-| [CausalFlow](https://arxiv.org/abs/2605.25338) | 替换某一步后重新执行，观察终局是否改变。 | 产生 step 级责任和验证后的最小 repair 对。 | 信号与下游结果直接关联。 | 多错误会交互；单步 rescue gain 不是步骤的固有“错误程度”。 |
 | [SPOT](https://arxiv.org/abs/2608.04419) | 某位置的候选 token 续写后得到的 verifier 结果。 | 只 probe 高价值位置，并按候选的下游成功率重构目标。 | 不把局部概率直接当作终局价值。 | 每个候选都要续写和验证，在线成本高；候选全错时仍无解。 |
 | [TA-OPD](https://arxiv.org/abs/2605.26844) | 教师纠正质量是否落在学生 top-k 支持内。 | 只保留高 teachability 的位置。 | 减少学生当前完全吸收不了的监督。 | 学生支持内不等于正确或有迁移价值；可能拒绝真正的新知识。 |
 | [PW-OPSD](https://arxiv.org/abs/2605.21606) | token 在生成序列中的相对位置。 | 使用显式 position weight。 | 廉价，不需要额外 rollout。 | 通用位置先验不能定位具体逻辑错误，可能跨任务失效。 |
-| SRPO entropy weight | 教师 next-token entropy。 | 低熵位置权重更高。 | 易计算，能抑制教师高度不确定的位置。 | 低熵可能是自信地错；高熵也可能只是多个合法表达或方法分叉。 |
 
 ### 独立判断
 
@@ -203,22 +196,19 @@ $$
 | 状态 | 诊断方式 | 合理处理 | 是否需要外部知识 |
 |---|---|---|---|
 | 搜索不足 | 增加采样/改变温度后偶尔能成功。 | 增加搜索或使用正确 sibling。 | 通常不需要。 |
-| 潜在能力可被 PI 唤醒 | 无 PI 失败，给答案/策略/反馈后教师能稳定成功。 | OPSD/SDPO 类蒸馏，并检查无 PI 迁移。 | 不一定。 |
+| 潜在能力可被 PI 唤醒 | 无 PI 失败，给答案/策略/反馈后教师能稳定成功。 | OPSD，并检查无 PI 迁移。 | 不一定。 |
 | 局部可修复 | 某个短 hint 或最小 step repair 能让后续重跑成功。 | 只蒸馏验证成功的 repair span。 | 可由内部或外部 hint 提供。 |
-| 真正知识缺失 | 增加搜索、PI 和局部 repair 后，教师仍不能产生可验证成功。 | 引入外部教师、检索、工具、求解器或课程；否则 mask/暂缓。 | **需要。** |
+| 真正知识缺失 | 增加搜索、PI 和局部 repair 后，教师仍不能产生可验证成功。 | 引入外部教师、检索、工具或求解器；否则 mask/暂缓。 | **需要。** |
 
-### 7.3 相关方法如何处理？
+### 7.3 OPSD 相关方法如何处理？
 
 | 方法 | 对全错/能力不足的处理 | 实际上解决了什么 | 仍未解决什么 |
 |---|---|---|---|
-| GRPO | 全错组几乎没有相对学习信号。 | 无。 | 冷启动和知识缺失。 |
+| OPSD | PI 教师在学生前缀上提供 dense 分布监督。 | PI 能唤醒潜在能力时，可在全错组中产生学习信号。 | PI 教师也不会时，没有正确知识来源。 |
 | PACED | \(p\approx0\) 的题被降权或跳过。 | 避免把预算浪费在当前不可学题。 | 没有扩展能力边界。 |
-| SDPO | 使用执行错误、文本反馈或其他 teacher information。 | 反馈足够时可把全错组变成 dense 监督。 | 无有效反馈或模型不会用反馈时仍失败。 |
-| [Canvas PSD](https://www.canvas.inc/research/privileged-self-distillation)¹ | 对失败点给短 hint，重跑并验证，只蒸馏成功的局部 repair；强版本可用外部 repair constructor。 | 把一部分 all-fail 样本变成验证过的局部监督。 | 依赖额外信息、可重放环境和 verifier。 |
-| Pedagogical RL¹ | PI 教师主动搜索“正确且学生可学”的成功轨迹。 | 改善教师可教性，而非只重评分。 | 教师找不到成功时仍无解。 |
-| [SOAR](https://proceedings.mlr.press/v306/sundaram26a.html) | 让教师生成较易的 stepping-stone 问题，以学生在难题上的进步作为反馈。 | 尝试通过 curriculum 扩展能力边界。 | 双层训练成本高；不是对当前错误 rollout 的直接修复。 |
-
-¹ Canvas PSD 是机构技术报告，Pedagogical RL 是作者 early-results 页面；两者应作为工程方向或初步证据，而非成熟定论。
+| TA-OPD | 超出学生当前支持的教师 token 被降权或跳过。 | 避免强迫学生学习当前不可吸收的信号。 | 是安全拒绝，不是创造新知识。 |
+| Critique-Conditioned OPSD | 用显式 critique 帮助教师定位错误后再重评分。 | 可能改善 PI 教师的纠错能力。 | critic 与教师共同不会时仍无解。 |
+| SPOT | 对候选 token 续写并用结果校准目标。 | 能在现有候选中找到更有希望的方向。 | 所有候选都失败时仍无正确监督。 |
 
 ### 独立判断
 
@@ -234,7 +224,7 @@ $$
 
 ---
 
-## 8. 建议的最小闭环，不做方法大杂烩
+## 8. 基于 OPSD 的最小闭环
 
 ### 8.1 三层训练设计
 
@@ -242,7 +232,7 @@ $$
 |---|---|---|---|
 | 可信门 | 这个监督能否相信？ | 最终答案 verifier；教师通过/拒绝/不确定；能用独立执行器时优先用。 | 不把同模型判断写成绝对真值。 |
 | 教师门 | 这个 PI 是否适合当前失败轨迹？ | 比较 answer-only、抽象策略、经过认证且兼容的 sibling；不兼容时改用 critique 或从更早前缀重启。 | 不盲目选择“最相似文本”的 sibling；不平均不同路线的 logits。 |
-| 信用门 | 哪一段应被更新？ | 题目级可学性门 + 验证成功的 step/span 二值 mask；span 内等系数。 | 首版不叠加 entropy、position、KL、因果分数等多重连续权重。 |
+| 信用门 | 哪一段应被更新？ | 题目级可学性门 + 验证成功的 step/span 二值 mask；span 内等系数。 | 首版不叠加 entropy、position、KL 等多重连续权重。 |
 
 ### 8.2 训练路由
 
@@ -255,7 +245,7 @@ $$
 6. 教师产生局部 critique 或 repair proposal
 7. 从错误前缀重跑，并用 verifier 检查 repair 是否真正改善终局
 8. 只对验证成功的 repair span 蒸馏
-9. PI 教师也无法修复 → 外部教师/工具/课程，或 mask
+9. PI 教师也无法修复 → 外部知识/工具，或 mask
 10. 在未见过的同技能题上做无 PI 评估
 ~~~
 
@@ -289,7 +279,7 @@ $$
 | 教师信息如何进入学生 | **未实现** | 固定学生前缀，比较 OPSD 重评分、critique-conditioned 重评分和局部 repair replay。 |
 | step/token 权重 | **未实现** | 先做“全轨迹等权”与“验证 span mask”两个基线；连续权重放到后续消融。 |
 | 8 条全错 | **只有回退规则** | 增加搜索、PI-teacher success、repair success 三项诊断，区分搜索失败与知识缺失。 |
-| 真正能力不足 | **未解决** | 外部教师/工具或课程基线；报告其额外 token、调用和墙钟成本。 |
+| 真正能力不足 | **未解决** | 外部教师/工具基线；报告其额外 token、调用和墙钟成本。 |
 | 是否学到可迁移知识 | **未验证** | 使用同技能不同表述/结构的隐藏题，无 PI 测试；不能用参与 PI 选择的题作最终测试。 |
 
 ### 推荐研究顺序
@@ -297,36 +287,28 @@ $$
 1. **先验证教师认证是否可信。**不可信，后面所有权重都会放大错误。
 2. **再验证 PI 兼容性。**正确 sibling 只有与当前状态兼容时才是好教师。
 3. **然后做二值 span mask。**先证明局部监督有效，再研究连续 token 权重。
-4. **最后处理能力边界。**将外部教师/工具/课程作为明确的升级路线，并单独计算成本。
+4. **最后处理能力边界。**PI 教师也不会时，明确转向外部知识/工具或 mask，并单独计算成本。
 
 ---
 
 ## 10. 证据状态与参考资料
 
-本文以方法机制为主，不把论文作者报告的单次实验结果当作已独立验证的事实。除特别说明外，2026 年工作以其官方 arXiv 页面所述版本为准；预印本结论仍需要复现。
+本表只保留直接研究 OPSD/OPD 的方法或诊断工作。本文以方法机制为主，不把论文作者报告的单次实验结果当作已独立验证的事实；预印本结论仍需要复现。
 
 | 资料 | 本文使用的核心信息 | 证据状态 |
 |---|---|---|
-| [DeepSeekMath / GRPO](https://arxiv.org/abs/2402.03300) | 组相对 advantage 与结果奖励。 | arXiv 公开版本；GRPO 来源论文 |
 | [OPSD](https://arxiv.org/abs/2601.18734) | PI-conditioned 同模型教师在学生前缀上重评分。 | arXiv 预印本；ICLR 2026 投稿版本，未核实为正式录用 |
-| [SDPO](https://proceedings.mlr.press/v306/hubotter26a.html) | 使用反馈或 sibling 的 self-distillation。 | ICML 2026 正式论文，PMLR 306 |
-| [SRPO](https://arxiv.org/abs/2604.02288) | 正确样本走 GRPO、错误样本走 SDPO，以及 entropy weighting。 | arXiv 预印本 |
 | [PACED](https://arxiv.org/abs/2603.11178) | 经验通过率驱动的题目级课程权重。 | arXiv 预印本 |
-| [HINT-SD](https://arxiv.org/abs/2605.17873) | hindsight 错误相关 action/span 选择与局部蒸馏。 | [EMNLP 2026 Findings 正式论文](https://aclanthology.org/2026.findings-emnlp.153/) |
 | [Trajectory-aware OPD（TOPD）](https://arxiv.org/abs/2606.00305) | 近未来轨迹感知的局部指导。 | arXiv 预印本 |
-| [CausalFlow](https://arxiv.org/abs/2605.25338) | step intervention、重执行与验证后的最小修复。 | arXiv 预印本 |
 | [SPOT](https://arxiv.org/abs/2608.04419) | 位置 probing 与 outcome-calibrated target。 | arXiv 预印本 |
 | [TA-OPD](https://arxiv.org/abs/2605.26844) | 基于学生支持的 token teachability。 | arXiv 预印本 |
 | [PW-OPSD](https://arxiv.org/abs/2605.21606) | 位置加权 OPSD。 | arXiv 预印本 |
 | [BRTS](https://arxiv.org/abs/2605.09725) | 正确性优先、学生对齐其次的 teacher trajectory 选择。 | arXiv 预印本 |
-| [SMRC-SD](https://arxiv.org/abs/2608.05219) | 状态匹配后再蒸馏。 | arXiv 预印本 |
+| [SMRC-SD](https://arxiv.org/abs/2608.05219) | privileged OPD 中的状态匹配参考蒸馏。 | arXiv 预印本；多轮 agent 设置 |
 | [What Should a Self-Teacher See?](https://arxiv.org/abs/2609.25623) | 不同 PI 抽象层级的比较。 | arXiv 预印本 |
 | [MCPD](https://arxiv.org/abs/2610.30880) | 多 partial context view 的概率空间边缘化。 | arXiv 预印本 |
 | [Privileged, but Biased](https://arxiv.org/abs/2608.04794) | 诊断单一 PI 参考造成的路线偏置和监督错位。 | Microsoft Research 技术报告 / arXiv 预印本 |
 | [Critique-Conditioned OPSD](https://arxiv.org/abs/2610.13744) | 先生成 critique，再进行 PI scoring。 | NeurIPS 2026 FLLMPT workshop oral；不是 NeurIPS 主会论文 |
-| [SOAR](https://proceedings.mlr.press/v306/sundaram26a.html) | 以学生进步为反馈的课程生成。 | ICML 2026 正式论文，PMLR 306 |
-| [Canvas PSD](https://www.canvas.inc/research/privileged-self-distillation) | hint、重跑、验证和局部蒸馏。 | 机构技术报告 |
-| [Pedagogical RL](https://noahziems.com/pedagogical-rl) | 正确性与学生可学习性共同训练 PI 教师。 | 作者 early-results 页面 |
 
 ---
 
