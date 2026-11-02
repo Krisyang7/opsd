@@ -124,7 +124,7 @@ flowchart TD
 
 学生和教师来自同一个模型，可能共享同一种错误。PI 可以改善判断条件，但不能让教师变成 oracle。
 
-因此，更准确的表述是“已认证正确”或“process-verified”，而不是“教师证明完全正确”。
+因此，更准确的表述是“已认证正确”或“teacher-certified”。只有获得独立执行器、规则检查或 verifier 的证据后，才宜称为“process-verified”。
 
 ---
 
@@ -320,3 +320,9 @@ sibling 会作为 PI 指导多个失败 rollout。如果 sibling 自己包含错
 相对于 SRPO，当前方法的顶层变化是：
 
 > **在正向奖励之前增加过程认证，并且只有经过双重验证的正确 rollout 才能获得正向强化或充当 sibling。**
+
+---
+
+## 延伸阅读
+
+- [相关方法、教师信息、权重分配与能力边界综述](docs/METHODS_TEACHER_WEIGHT_CAPABILITY_REVIEW.md)
